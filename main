@@ -1,0 +1,200 @@
+import os
+from string import Template
+import json
+from neo4j import GraphDatabase
+import glob
+from timeit import default_timer as timer
+from dotenv import load_dotenv 
+from time import sleep 
+import groq as groqai
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Load environment variables
+load_dotenv()
+
+# Groq client setup
+os.environ["GROQ_API_KEY"] = "HERE GOES THE GROQ API KEY , EXAMPLE: sk_1234567890" 
+client = groqai.Groq(api_key=os.environ.get("GROQ_API_KEY"))
+
+# Neo4j setup
+NEO4J_URI = "HERE GOES THE NEO4J URI , EXAMPLE: neo4j+s://<YOUR_NEO4J_INSTANCE>.databases.neo4j.io"
+NEO4J_USER = "HERE GOES THE NEO4J USER , EXAMPLE: neo4j"
+NEO4J_PASSWORD = "HERE GOES THE NEO4J PASSWORD , EXAMPLE: password"
+gds = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+
+
+
+def process_groq(file_prompt, system_msg):
+    completion = client.chat.completions.create(
+        model="llama3-8b-8192",
+        max_tokens=15000,
+        temperature=0,
+        messages=[
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": file_prompt},
+        ],
+    )
+    nlp_results = completion.choices[0].message.content
+    sleep(8)
+    return nlp_results
+
+
+def extract_entities_relationships(folder, prompt_template):
+    start = timer()
+    files = glob.glob(f"./data/{folder}/*")
+    system_msg = "You are a helpful IT-project and account management expert who extracts information from documents."
+    print(f"Running pipeline for {len(files)} files in {folder} folder")
+    results = []
+    for i, file in enumerate(files):
+        print(f"Extracting entities and relationships for {file}")
+        try:
+            with open(file, "r") as f:
+                text = f.read().rstrip()
+                prompt = Template(prompt_template).substitute(ctext=text)
+                result = process_groq(prompt, system_msg=system_msg)
+                results.append(json.loads(result))
+          
+        except Exception as e:
+            print(f"Error processing {file}: {e}")
+            
+    
+    output_path = os.path.join("processes", "pre_processed_result.txt")
+    counter = 1 
+    
+    while os.path.exists(output_path):
+        output_path = os.path.join("data", "processes", f"pre_processed_result_{counter}.txt")
+        counter += 1
+    
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(json.dumps(results, ensure_ascii=False, indent=4))
+    
+    end = timer()
+    print(f"Pipeline completed in {end-start} seconds")
+    return results
+
+
+
+def generate_cypher(json_obj):
+    e_statements = []
+    r_statements = []
+
+    e_label_map = {}
+
+    # loop through our json object
+    for i, obj in enumerate(json_obj):
+        print(f"Generating cypher for file {i+1} of {len(json_obj)}")
+        for entity in obj["entities"]:
+            label = entity["label"]
+            id = entity["id"]
+            id = id.replace("-", "").replace("_", "")
+            
+            properties = {k: v for k, v in entity.items() if k not in ["label", "id"]}
+
+            cypher = f'MERGE (n:{label} {{id: "{id}"}})'
+            if properties:
+                props_str = ", ".join(
+                    [f'n.{key} = "{val}"' for key, val in properties.items()]
+                )
+                cypher += f" ON CREATE SET {props_str}"
+            e_statements.append(cypher)
+            e_label_map[id] = label
+
+        for rs in obj["relationships"]:
+            src_id, rs_type, tgt_id = rs.split("|")
+            src_id = src_id.replace("-", "").replace("_", "")
+            tgt_id = tgt_id.replace("-", "").replace("_", "")
+
+            # Check if src_id and tgt_id exist in e_label_map
+            if src_id not in e_label_map:
+                label = "Entity"  # Default label if not found in entities
+                e_label_map[src_id] = label
+                e_statements.append(f'MERGE (n:{label} {{id: "{src_id}", name: "{src_id}"}})')
+            if tgt_id not in e_label_map:
+                label = "Entity"  # Default label if not found in entities
+                e_label_map[tgt_id] = label
+                e_statements.append(f'MERGE (n:{label} {{id: "{tgt_id}", name: "{tgt_id}"}})')
+
+            src_label = e_label_map[src_id]
+            tgt_label = e_label_map[tgt_id]
+
+            cypher = f'MERGE (a:{src_label} {{id: "{src_id}"}}) MERGE (b:{tgt_label} {{id: "{tgt_id}"}}) MERGE (a)-[:{rs_type}]->(b)'
+            r_statements.append(cypher)
+
+    with open("cyphers.txt", "w") as outfile:
+        outfile.write("\n".join(e_statements + r_statements))
+
+    return e_statements + r_statements
+
+
+
+# Final function to bring all the steps together
+def ingestion_pipeline(folders):
+    # Extrating the entites and relationships from each folder, append into one json_object
+    system_msg = "You are a helpful IT-project and account management expert who extracts information from documents."
+    entities_relationships = []
+    for key, value in folders.items():
+        data = extract_entities_relationships(key, value)
+    
+       
+        entities_relationships.extend(data)    
+    
+    # Generate and execute cypher statements
+    cypher_statements = generate_cypher(entities_relationships)
+    for i, stmt in enumerate(cypher_statements):
+        print(f"Executing cypher statement {i+1} of {len(cypher_statements)}")
+        try:
+            gds.execute_query(stmt)
+        except Exception as e:
+            with open("failed_statements.txt", "w") as f:
+                f.write(f"{stmt} - Exception: {e}\n")
+                
+                
+drug_prompt = """
+From the scientific text below, extract the following Entities & relationships described in the mentioned format:
+
+0. RESPOND ONLY WITH THE REQUESTED OUTPUT. DO NOT INCLUDE ANY INTRODUCTORY PHRASES OR EXPLANATIONS.
+1. ALWAYS FINISH THE OUTPUT. Never send partial responses.(DONT FORGET COMMAS!!)
+2. Id Must be unique and describe the entity.
+3. Remember that a entety must be in some of the types
+
+Note: DO NOT RELATE AN ENTITY TO ITSELF. For example, "geneid|INTERACTS_WITH|geneid" is not a valid relationship if both genes are the same.
+
+Remember:
+- The final output should be a valid JSON object.
+
+Entity Types:
+label:'Drug',id:string,name:string // Name of the medication
+label:'Disease',id:string,name:string // Name of the disease
+label:'Gene',id:string,name:string // Name of the gene
+
+
+Relationships:
+drug|TREATS|disease
+gene|ASSOCIATED_WITH|disease
+drug|INTERACTS_WITH|gene
+gene|INTERACTS_WITH|gene
+
+
+The output should look like:
+{
+ "entities": [{"label":"Drug","id":string,"name":string}, {"label":"Disease","id":string,"name":string}, {"label":"Gene","id":string,"name":string}],
+ "relationships": ["drugid|TREATS|diseaseid", "geneid|ASSOCIATED_WITH|diseaseid", "drugid|INTERACTS_WITH|geneid", "geneid|INTERACTS_WITH|geneid"]
+}
+
+Scientific text:
+$ctext
+"""
+
+
+
+
+folders = {
+    "corpus": drug_prompt,
+}
+
+ingestion_pipeline(folders)
