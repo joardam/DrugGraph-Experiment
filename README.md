@@ -32,10 +32,10 @@ Este projeto utiliza uma LLM (Large Language Model) para extrair informações d
 2.Instale as dependências:
   pip install -r requirements.txt
 3.Configure as variáveis de ambiente no arquivo .env.
-4.Configure suas chaves de API da Groq e do Neon4j
+4.Configure suas chaves de API da Groq e do Neon4j.
 6.Sinta-se livre para alterar o Corpus textual e o prompt de obtenção das entidades e relações
 7.Execute o script principal:
-8.python main.py
+  python main.py
 
 
 ## Contribuições
