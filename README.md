@@ -1,5 +1,3 @@
-# DrugGraph-Experiment
-
 # Projeto de Extração de Informações e Criação de Grafos
 
 Este projeto utiliza uma LLM (Large Language Model) para extrair informações de um corpus textual, criando um grafo e estabelecendo suas conexões. O objetivo é visualizar e analisar as relações presentes no texto de forma estruturada e acessível.
